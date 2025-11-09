@@ -36,7 +36,13 @@ from typing import List, Dict, Any, Optional, Iterable, Union, Tuple
 import shutil
 import asyncio
 try:
-    from playwright.sync_api import sync_playwright, Playwright, Browser, Page
+    from playwright.async_api import (
+        async_playwright,
+        Playwright as AsyncPlaywright,
+        Browser as AsyncBrowser,
+        Page as AsyncPage,
+        ElementHandle,
+    )
     PLAYWRIGHT_AVAILABLE = True
 except Exception:
     PLAYWRIGHT_AVAILABLE = False
@@ -55,6 +61,94 @@ def _log_with_thread(message: str, prefix: str = ""):
         print(f"[{thread_id}] {prefix} {message}")
     else:
         print(f"[{thread_id}] {message}")
+
+
+class _PlaywrightAsyncManager:
+    """Singleton manager that runs Playwright async API on a dedicated event loop thread."""
+
+    _instance: Optional["_PlaywrightAsyncManager"] = None
+    _lock = threading.Lock()
+
+    def __init__(self):
+        if not PLAYWRIGHT_AVAILABLE:
+            raise RuntimeError("Playwright is not installed or failed to import")
+        self.loop = asyncio.new_event_loop()
+        self._startup_complete = threading.Event()
+        self._playwright: Optional[AsyncPlaywright] = None
+        self._browser: Optional[AsyncBrowser] = None
+        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="PlaywrightAsyncLoop")
+        self._thread.start()
+        # Wait for startup to finish
+        self._startup_complete.wait()
+
+    @classmethod
+    def instance(cls) -> "_PlaywrightAsyncManager":
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls()
+        return cls._instance
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self._startup())
+        self._startup_complete.set()
+        self.loop.run_forever()
+
+    async def _startup(self):
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--no-zygote",
+                "--renderer-process-limit=1",
+                "--js-flags=--max-old-space-size=128",
+                "--disable-extensions",
+                "--disable-logging",
+                "--disable-notifications",
+                "--disable-default-apps",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-features=TranslateUI",
+                "--disable-ipc-flooding-protection",
+                "--disk-cache-size=0",
+                "--media-cache-size=0",
+            ],
+        )
+
+    def run_sync(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+
+    def new_context_page(self):
+        return self.run_sync(self._new_context_page())
+
+    async def _new_context_page(self):
+        assert self._browser is not None
+        context = await self._browser.new_context(ignore_https_errors=True)
+
+        async def route_handler(route):
+            resource_type = route.request.resource_type
+            if resource_type in ("image", "media"):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await context.route("**/*", route_handler)
+        # Keep handler from being garbage collected
+        context._image_block_handler = route_handler  # type: ignore[attr-defined]
+
+        page = await context.new_page()
+        await page.set_viewport_size({"width": 1920, "height": 1080})
+        await page.set_default_navigation_timeout(30000)
+        await page.set_default_timeout(10000)
+        return context, page
+
+    def close_context(self, context):
+        self.run_sync(context.close())
 
 # Supabase imports
 try:
@@ -227,134 +321,129 @@ class UniversalProductExtractor:
 
     # ------------------------ Playwright Integration ---------------------------
     class _PWElement:
-        def __init__(self, handle):
+        def __init__(self, manager: _PlaywrightAsyncManager, handle: ElementHandle):
+            self._manager = manager
             self._handle = handle
-            self._locator = handle
+
+        def _run(self, coro):
+            return self._manager.run_sync(coro)
+
         def is_displayed(self) -> bool:
             try:
-                return self._handle.is_visible()
+                return bool(self._run(self._handle.is_visible()))
             except Exception:
                 return True
+
         def is_enabled(self) -> bool:
             try:
-                return self._handle.is_enabled()
+                return bool(self._run(self._handle.is_enabled()))
             except Exception:
                 return True
+
         def get_attribute(self, name: str) -> Optional[str]:
             try:
-                return self._handle.get_attribute(name)
+                return self._run(self._handle.get_attribute(name))
             except Exception:
                 return None
+
         @property
         def text(self) -> str:
             try:
-                return self._handle.inner_text() or ""
+                result = self._run(self._handle.inner_text())
+                return result or ""
             except Exception:
                 return ""
+
         def click(self):
             try:
-                self._handle.click(timeout=3000)
+                self._run(self._handle.click(timeout=3000))
             except Exception:
                 pass
 
     class _PWDriver:
-        def __init__(self, page: Page):
+        def __init__(self, manager: _PlaywrightAsyncManager, context, page: AsyncPage):
+            self._manager = manager
+            self._context = context
             self._page = page
-            try:
-                self._page.set_default_navigation_timeout(30000)
-                self._page.set_default_timeout(10000)
-            except Exception:
-                pass
+
+        def _run(self, coro):
+            return self._manager.run_sync(coro)
+
         def set_page_load_timeout(self, ms: int):
+            timeout_ms = max(ms * 1000, 1)
             try:
-                self._page.set_default_navigation_timeout(ms * 1000)
+                self._run(self._page.set_default_navigation_timeout(timeout_ms))
+                self._run(self._page.set_default_timeout(timeout_ms))
             except Exception:
                 pass
+
         def get(self, url: str):
-            self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            self._run(self._page.goto(url, wait_until="domcontentloaded", timeout=30000))
+
         def find_elements(self, by, selector: str):
+            query = selector
+            if by == By.XPATH:
+                query = f"xpath={selector}"
             try:
-                if by == By.CSS_SELECTOR:
-                    els = self._page.query_selector_all(selector)
-                elif by == By.XPATH:
-                    els = self._page.query_selector_all(f'xpath={selector}')
-                elif by == By.TAG_NAME:
-                    els = self._page.query_selector_all(selector)
-                else:
-                    els = self._page.query_selector_all(selector)
-                return [UniversalProductExtractor._PWElement(e) for e in els if e is not None]
+                handles = self._run(self._page.query_selector_all(query))
+                return [
+                    UniversalProductExtractor._PWElement(self._manager, handle)
+                    for handle in handles
+                    if handle is not None
+                ]
             except Exception:
                 return []
+
         def find_element(self, by, selector: str):
-            els = self.find_elements(by, selector)
-            return els[0] if els else None
+            elements = self.find_elements(by, selector)
+            return elements[0] if elements else None
+
         def execute_script(self, script: str, *args):
             try:
-                # Normalize common Selenium JS patterns
                 s = script.strip()
                 if s.startswith("return "):
                     s = s[len("return "):].strip()
-                # Handle element click: arguments[0].click();
-                if "arguments[0].click" in s and args:
-                    el = args[0]
+                actual_args = []
+                for arg in args:
+                    if isinstance(arg, UniversalProductExtractor._PWElement):
+                        actual_args.append(arg._handle)
+                    else:
+                        actual_args.append(arg)
+                if "arguments[0].click" in s and actual_args:
                     try:
-                        if isinstance(el, UniversalProductExtractor._PWElement):
-                            el._handle.click(timeout=3000)
-                            return None
+                        handle = actual_args[0]
+                        self._run(handle.click(timeout=3000))
+                        return None
                     except Exception:
                         return None
-                # Handle scroll patterns
-                if "window.scrollTo" in s:
-                    return self._page.evaluate(s)
                 if "document.body.scrollHeight" in s:
-                    return self._page.evaluate("document.body.scrollHeight")
-                # Fallback: evaluate expression
-                return self._page.evaluate(s)
+                    return self._run(self._page.evaluate("document.body.scrollHeight"))
+                if "window.scrollTo" in s:
+                    return self._run(self._page.evaluate(s, *actual_args))
+                return self._run(self._page.evaluate(s, *actual_args))
             except Exception:
                 return None
+
+        def delete_all_cookies(self):
+            try:
+                self._run(self._context.clear_cookies())
+            except Exception:
+                pass
+
         def quit(self):
             try:
-                self._page.context.close()
+                self._manager.close_context(self._context)
             except Exception:
                 pass
 
     _PW_SINGLETON_LOCK = threading.Lock()
-    _PW_BROWSER: Optional[Browser] = None
-    _PW_PLAYWRIGHT: Optional[Playwright] = None
+    _PW_MANAGER: Optional[_PlaywrightAsyncManager] = None
 
-    def _ensure_playwright_browser(self) -> Browser:
+    def _get_playwright_manager(self) -> _PlaywrightAsyncManager:
         with UniversalProductExtractor._PW_SINGLETON_LOCK:
-            if UniversalProductExtractor._PW_BROWSER is not None:
-                return UniversalProductExtractor._PW_BROWSER
-            if not PLAYWRIGHT_AVAILABLE:
-                raise RuntimeError("Playwright not available")
-            UniversalProductExtractor._PW_PLAYWRIGHT = sync_playwright().start()
-            pw = UniversalProductExtractor._PW_PLAYWRIGHT
-            assert pw is not None
-            UniversalProductExtractor._PW_BROWSER = pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-software-rasterizer",
-                    "--no-zygote",
-                    "--renderer-process-limit=1",
-                    "--js-flags=--max-old-space-size=128",
-                    "--disable-extensions",
-                    "--disable-logging",
-                    "--disable-notifications",
-                    "--disable-default-apps",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--disable-features=TranslateUI",
-                    "--disable-ipc-flooding-protection",
-                    "--disk-cache-size=0",
-                    "--media-cache-size=0",
-                ],
-            )
-            return UniversalProductExtractor._PW_BROWSER
+            if UniversalProductExtractor._PW_MANAGER is None:
+                UniversalProductExtractor._PW_MANAGER = _PlaywrightAsyncManager.instance()
+        return UniversalProductExtractor._PW_MANAGER
 
 
     def _reset_thread_driver(self):
@@ -1095,24 +1184,13 @@ class UniversalProductExtractor:
         # Switch to Playwright if enabled and available to drastically reduce OS process usage
         use_playwright = os.getenv("USE_PLAYWRIGHT", "1") == "1"
         if use_playwright and PLAYWRIGHT_AVAILABLE:
-            # If an asyncio loop is already running in this thread, avoid Playwright Sync API
             try:
-                asyncio.get_running_loop()
-                # Running inside an event loop; skip Playwright Sync API to prevent runtime errors
-                _log_with_thread("Async loop detected; skipping Playwright Sync API and using Selenium fallback", "[!]")
-            except RuntimeError:
-                # No running loop -> safe to use Playwright Sync API
-                browser = self._ensure_playwright_browser()
-                # Create isolated context/page per thread
-                context = browser.new_context(ignore_https_errors=True)
-                # Disable images via route for performance similar to Selenium prefs
-                try:
-                    context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "media") else route.continue_())
-                except Exception:
-                    pass
-                page = context.new_page()
-                self._thread_local.profile_dir = None  # Playwright manages its own storage unless configured
-                return UniversalProductExtractor._PWDriver(page)  # type: ignore[return-value]
+                manager = self._get_playwright_manager()
+                context, page = manager.new_context_page()
+                self._thread_local.profile_dir = None
+                return UniversalProductExtractor._PWDriver(manager, context, page)  # type: ignore[return-value]
+            except Exception as exc:
+                _log_with_thread(f"Playwright setup failed ({exc}); falling back to Selenium", "[!]")
         chrome_options = Options()
         chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
