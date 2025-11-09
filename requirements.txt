@@ -1,0 +1,22 @@
+# Production Dependencies for E-Commerce Product Extraction Pipeline
+
+# Database
+supabase>=2.0.0
+
+# Web Scraping & Browser Automation
+selenium>=4.15.0
+webdriver-manager>=4.0.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Standard Library (included with Python)
+# urllib.parse
+# json
+# time
+# datetime
+# typing
+# threading
+# signal
+# os
+# sys

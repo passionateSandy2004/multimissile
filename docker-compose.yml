@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  multithread-missile:
+    build:
+      context: ..
+      dockerfile: MultiThreadMissile/Dockerfile
+    container_name: multithread-missile
+    restart: unless-stopped
+    
+    # Environment variables
+    environment:
+      # Supabase Configuration
+      - SUPABASE_URL=${SUPABASE_URL:-https://whfjofihihlhctizchmj.supabase.co}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      
+      # Parallel Processing Configuration
+      - MAX_PARALLEL_WORKERS=${MAX_PARALLEL_WORKERS:-10}
+      - DB_URL_BATCH_SIZE=${DB_URL_BATCH_SIZE:-1000}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      
+      # Processing Configuration
+      - DRY_RUN_SAMPLE=${DRY_RUN_SAMPLE:-0}
+      - DRY_RUN_ONLY=${DRY_RUN_ONLY:-false}
+      - PARALLEL_PROGRESS_LOG=${PARALLEL_PROGRESS_LOG:-true}
+      - DB_URL_STATUS_FILTER=${DB_URL_STATUS_FILTER:-pending,retrying}
+      - DB_URL_LIMIT=${DB_URL_LIMIT:-0}
+      - DB_URL_OFFSET=${DB_URL_OFFSET:-0}
+      
+      # Manual URL Processing (optional)
+      - BULK_URLS=${BULK_URLS:-}
+      - BULK_URLS_FILE=${BULK_URLS_FILE:-}
+      
+      # System Configuration
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=:99
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+    
+    # Shared memory size for Chrome (important for multiple workers)
+    shm_size: '2gb'
+    
+    # Volumes (optional - for logs or data persistence)
+    volumes:
+      - ./logs:/app/logs:rw
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+

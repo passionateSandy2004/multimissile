@@ -1,0 +1,61 @@
+# Railway ignore file - similar to .gitignore
+# Files/folders to exclude from deployment
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment files (these should be set in Railway dashboard)
+.env
+.env.local
+.env.*.local
+
+# Git
+.git/
+.gitignore
+
+# Docker (not needed if using Nixpacks)
+# Dockerfile
+# .dockerignore
+# docker-compose.yml
+
+# Documentation (optional - can be included)
+# *.md
+# !README.md
+
+# Test files
+test_*.py
+*_test.py
+tests/
+
+# Cache
+.cache/
+.pytest_cache/
+
