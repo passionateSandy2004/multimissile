@@ -57,6 +57,7 @@ def _get_supabase_client() -> Optional[Client]:
         if _SUPABASE_CLIENT is None:
             try:
                 _SUPABASE_CLIENT = create_client(SUPABASE_URL, SUPABASE_KEY)
+                print("[✓] Connected to Supabase for product storage\n")
             except Exception as exc:
                 print(f"[!] Failed to initialize Supabase client: {exc}")
                 _SUPABASE_CLIENT = None
@@ -80,9 +81,7 @@ class UniversalProductExtractor:
         self.supabase: Optional[Client] = None
         if SUPABASE_AVAILABLE and SUPABASE_KEY:
             self.supabase = _get_supabase_client()
-            if self.supabase:
-                print("[✓] Connected to Supabase for product storage\n")
-            else:
+            if not self.supabase:
                 print("[!] Warning: Failed to connect to Supabase. Products will not be saved to database\n")
         elif not SUPABASE_AVAILABLE:
             print("[!] Warning: supabase-py not installed. Products will not be saved to database\n")
@@ -898,7 +897,8 @@ class UniversalProductExtractor:
         
         # Additional Railway/container-specific options
         chrome_options.add_argument('--disable-setuid-sandbox')
-        chrome_options.add_argument('--remote-debugging-port=9222')
+        # Note: Remote debugging port removed to avoid port conflicts in multi-threaded environments
+        # If debugging is needed, use --remote-debugging-port with a unique port per thread
         
         chrome_binary = os.getenv("CHROME_BIN")
         if chrome_binary:
