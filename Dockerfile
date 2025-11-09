@@ -43,13 +43,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Verify Chrome installation
 RUN google-chrome --version || echo "Chrome installation verification"
 
-# Install matching ChromeDriver
-RUN CHROME_VERSION=$(google-chrome --version | cut -d ' ' -f3 | cut -d '.' -f1) \
-    && DRIVER_VERSION=$(curl -sS https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}) \
-    && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${DRIVER_VERSION}/chromedriver_linux64.zip \
-    && unzip /tmp/chromedriver.zip -d /usr/local/bin/ \
-    && rm /tmp/chromedriver.zip \
-    && chmod +x /usr/local/bin/chromedriver
+# Install matching ChromeDriver with fallback to latest
+RUN set -eux; \
+    CHROME_VERSION="$(google-chrome --version | awk '{print $3}')" ; \
+    CHROME_MAJOR="${CHROME_VERSION%%.*}" ; \
+    DRIVER_VERSION="$(curl -sSf https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_MAJOR})" || \
+    DRIVER_VERSION="$(curl -sSf https://chromedriver.storage.googleapis.com/LATEST_RELEASE)" ; \
+    wget -q -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/${DRIVER_VERSION}/chromedriver_linux64.zip" || \
+    (DRIVER_VERSION="$(curl -sSf https://chromedriver.storage.googleapis.com/LATEST_RELEASE)" && \
+     wget -q -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/${DRIVER_VERSION}/chromedriver_linux64.zip") ; \
+    unzip /tmp/chromedriver.zip -d /usr/local/bin/ ; \
+    rm /tmp/chromedriver.zip ; \
+    chmod +x /usr/local/bin/chromedriver
 
 # Set working directory
 WORKDIR /app
