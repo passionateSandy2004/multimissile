@@ -79,6 +79,9 @@ class UniversalProductExtractor:
         self._driver_creation_lock = threading.Lock()  # Lock for driver creation to prevent race conditions
         # Semaphore to limit concurrent driver creation (max 2 at a time to avoid Errno 11)
         self._driver_creation_semaphore = threading.Semaphore(2)
+        # Track URLs processed per driver to force cleanup periodically
+        self._urls_processed = 0
+        self._urls_per_driver_cleanup = _get_env_int("URLS_PER_DRIVER_CLEANUP", 50)  # Restart driver every 50 URLs
         
         # Initialize Supabase connection
         self.supabase: Optional[Client] = None
@@ -159,11 +162,31 @@ class UniversalProductExtractor:
 
     def _get_or_create_driver(self) -> webdriver.Chrome:
         driver = getattr(self._thread_local, "driver", None)
+        thread_urls = getattr(self._thread_local, "urls_processed", 0)
+        
+        # Force cleanup and restart driver after N URLs to prevent resource accumulation
+        if driver is not None and thread_urls >= self._urls_per_driver_cleanup:
+            try:
+                print(f"[*] Restarting driver after {thread_urls} URLs to prevent resource accumulation")
+                driver.quit()
+            except Exception:
+                pass
+            with self._drivers_lock:
+                self._active_drivers.discard(driver)
+            try:
+                del self._thread_local.driver
+            except AttributeError:
+                pass
+            driver = None
+            self._thread_local.urls_processed = 0
+        
         if driver is None:
             driver = self._setup_driver()
             self._thread_local.driver = driver
+            self._thread_local.urls_processed = 0
             with self._drivers_lock:
                 self._active_drivers.add(driver)
+        
         return driver
 
     def _reset_thread_driver(self):
@@ -461,6 +484,11 @@ class UniversalProductExtractor:
                     product_type_id=product_type_id,
                     searched_product_id=searched_product_id,
                 )
+                
+                # Increment URL counter for driver cleanup
+                if reuse_driver:
+                    thread_urls = getattr(self._thread_local, "urls_processed", 0)
+                    self._thread_local.urls_processed = thread_urls + 1
 
                 return {
                     "success": True,
@@ -1792,6 +1820,14 @@ class ParallelURLExtractor:
             extractor.close_reusable_driver()
             duration = time.time() - start_time
             error_message = str(exc)
+            
+            # If Errno 11 (resource unavailable), add longer backoff before retry
+            if "Errno 11" in error_message or "Resource temporarily unavailable" in error_message:
+                # Wait longer before retrying to let system recover
+                backoff_seconds = 5 + (retry_count * 2)  # 5s, 7s, 9s, etc.
+                print(f"[!] Errno 11 detected, waiting {backoff_seconds}s before retry...")
+                time.sleep(backoff_seconds)
+            
             if url_id is not None:
                 _mark_for_retry(url_id, retry_count, error_message, max_retries)
             return {
