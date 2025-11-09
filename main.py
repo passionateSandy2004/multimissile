@@ -289,7 +289,26 @@ class UniversalProductExtractor:
             return els[0] if els else None
         def execute_script(self, script: str, *args):
             try:
-                return self._page.evaluate(script, *args)
+                # Normalize common Selenium JS patterns
+                s = script.strip()
+                if s.startswith("return "):
+                    s = s[len("return "):].strip()
+                # Handle element click: arguments[0].click();
+                if "arguments[0].click" in s and args:
+                    el = args[0]
+                    try:
+                        if isinstance(el, UniversalProductExtractor._PWElement):
+                            el._handle.click(timeout=3000)
+                            return None
+                    except Exception:
+                        return None
+                # Handle scroll patterns
+                if "window.scrollTo" in s:
+                    return self._page.evaluate(s)
+                if "document.body.scrollHeight" in s:
+                    return self._page.evaluate("document.body.scrollHeight")
+                # Fallback: evaluate expression
+                return self._page.evaluate(s)
             except Exception:
                 return None
         def quit(self):
