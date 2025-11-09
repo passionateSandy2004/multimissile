@@ -895,8 +895,13 @@ class UniversalProductExtractor:
         chrome_options.add_experimental_option('useAutomationExtension', False)
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         
-        # Additional Railway/container-specific options
+        # Additional Railway/container-specific options for stability
         chrome_options.add_argument('--disable-setuid-sandbox')
+        chrome_options.add_argument('--disable-background-timer-throttling')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
+        chrome_options.add_argument('--disable-features=TranslateUI')
+        chrome_options.add_argument('--disable-ipc-flooding-protection')
         # Note: Remote debugging port removed to avoid port conflicts in multi-threaded environments
         # If debugging is needed, use --remote-debugging-port with a unique port per thread
         
