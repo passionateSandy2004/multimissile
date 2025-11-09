@@ -33,6 +33,7 @@ import uuid
 import random
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable, Union, Tuple
+import shutil
 
 
 def _get_thread_id() -> str:
@@ -96,7 +97,10 @@ class UniversalProductExtractor:
         self._driver_creation_semaphore = threading.Semaphore(1)
         # Track URLs processed per driver to force cleanup periodically
         self._urls_processed = 0
-        self._urls_per_driver_cleanup = _get_env_int("URLS_PER_DRIVER_CLEANUP", 25)  # Restart driver every 25 URLs (more aggressive)
+        self._urls_per_driver_cleanup = _get_env_int("URLS_PER_DRIVER_CLEANUP", 10)  # Restart driver every 10 URLs for stability
+        # Resource thresholds
+        self._fd_threshold = _get_env_int("FD_THRESHOLD", 2048)
+        self._child_proc_threshold = _get_env_int("CHILD_PROC_THRESHOLD", 150)
         
         # Initialize Supabase connection
         self.supabase: Optional[Client] = None
@@ -183,17 +187,28 @@ class UniversalProductExtractor:
         if driver is not None and thread_urls >= self._urls_per_driver_cleanup:
             try:
                 _log_with_thread(f"Restarting driver after {thread_urls} URLs to prevent resource accumulation", "[*]")
-                driver.quit()
+                self._reset_thread_driver()
             except Exception:
-                pass
-            with self._drivers_lock:
-                self._active_drivers.discard(driver)
-            try:
-                del self._thread_local.driver
-            except AttributeError:
                 pass
             driver = None
             self._thread_local.urls_processed = 0
+        
+        # Resource guard: proactively recycle driver if system is under pressure
+        try:
+            child_count = _count_child_processes()
+            fd_count = _count_open_fds()
+            if ((self._child_proc_threshold and child_count > self._child_proc_threshold) or
+                (self._fd_threshold and fd_count > self._fd_threshold)):
+                if driver is not None:
+                    _log_with_thread(f"Recycling driver due to high load (children={child_count}, fds={fd_count})", "[!]")
+                    try:
+                        self._reset_thread_driver()
+                    except Exception:
+                        pass
+                    driver = None
+                    self._thread_local.urls_processed = 0
+        except Exception:
+            pass
         
         if driver is None:
             driver = self._setup_driver()
@@ -217,6 +232,17 @@ class UniversalProductExtractor:
         try:
             del self._thread_local.driver
         except AttributeError:
+            pass
+        # Remove ephemeral profile dir if present
+        try:
+            profile_dir = getattr(self._thread_local, "profile_dir", None)
+            if profile_dir and isinstance(profile_dir, str) and profile_dir.startswith("/tmp/chrome-profile-"):
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            try:
+                del self._thread_local.profile_dir
+            except Exception:
+                pass
+        except Exception:
             pass
 
     def close_reusable_driver(self):
@@ -959,12 +985,20 @@ class UniversalProductExtractor:
             chrome_options.page_load_strategy = "eager"
         except Exception:
             pass
-        # Unique user data dir per thread to avoid profile locks
+        # Ephemeral user data dir per driver to avoid profile buildup and locks
         try:
             _tid = threading.current_thread().ident or 0
-            chrome_options.add_argument(f'--user-data-dir=/tmp/chrome-profile-{_tid}')
+            profile_dir = f"/tmp/chrome-profile-{_tid}-{int(time.time()*1000)}-{random.randint(1000,9999)}"
+            os.makedirs(profile_dir, exist_ok=True)
+            self._thread_local.profile_dir = profile_dir
+            chrome_options.add_argument(f'--user-data-dir={profile_dir}')
         except Exception:
             pass
+        # Disable caches to reduce FD and disk usage
+        chrome_options.add_argument('--disk-cache-size=0')
+        chrome_options.add_argument('--media-cache-size=0')
+        chrome_options.add_argument('--disable-cache')
+        chrome_options.add_argument('--disable-application-cache')
         # Enable Chrome verbose logs to stderr (captured by platform logs)
         chrome_options.add_argument('--enable-logging=stderr')
         chrome_options.add_argument('--v=1')
