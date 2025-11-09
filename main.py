@@ -30,6 +30,7 @@ import time
 import os
 import threading
 import uuid
+import random
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable, Union, Tuple
 
@@ -921,7 +922,13 @@ class UniversalProductExtractor:
 
         last_error: Optional[Exception] = None
         max_retries = 3
-        retry_delay = 0.5  # Start with 0.5 seconds
+        retry_delay = 2.0  # Start with 2 seconds (longer delay for Railway)
+        
+        # Stagger startup to avoid all workers hitting resources at once
+        # Use thread ID to create unique delays per worker
+        thread_id = threading.current_thread().ident or 0
+        startup_delay = random.uniform(0.2, 0.8) * (thread_id % 10) / 10.0
+        time.sleep(startup_delay)
         
         # Retry logic for each path
         for path in driver_paths:
@@ -929,9 +936,13 @@ class UniversalProductExtractor:
                 continue
             for attempt in range(max_retries):
                 try:
-                    # Small delay to avoid resource contention
+                    # Longer delay to avoid resource contention (especially on Railway)
                     if attempt > 0:
-                        time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+                        delay = retry_delay * (2 ** attempt)  # Exponential backoff
+                        time.sleep(delay)
+                    else:
+                        # Small initial delay even on first attempt
+                        time.sleep(0.3)
                     
                     service = Service(path)
                     driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -949,7 +960,10 @@ class UniversalProductExtractor:
             for attempt in range(max_retries):
                 try:
                     if attempt > 0:
-                        time.sleep(retry_delay * (2 ** attempt))
+                        delay = retry_delay * (2 ** attempt)
+                        time.sleep(delay)
+                    else:
+                        time.sleep(0.3)
                     service = Service(ChromeDriverManager().install())
                     driver = webdriver.Chrome(service=service, options=chrome_options)
                     driver.set_page_load_timeout(30)
@@ -965,7 +979,10 @@ class UniversalProductExtractor:
         for attempt in range(max_retries):
             try:
                 if attempt > 0:
-                    time.sleep(retry_delay * (2 ** attempt))
+                    delay = retry_delay * (2 ** attempt)
+                    time.sleep(delay)
+                else:
+                    time.sleep(0.3)
                 driver = webdriver.Chrome(options=chrome_options)
                 driver.set_page_load_timeout(30)
                 return driver
