@@ -34,6 +34,7 @@ import random
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable, Union, Tuple
 import shutil
+import asyncio
 try:
     from playwright.sync_api import sync_playwright, Playwright, Browser, Page
     PLAYWRIGHT_AVAILABLE = True
@@ -1094,17 +1095,24 @@ class UniversalProductExtractor:
         # Switch to Playwright if enabled and available to drastically reduce OS process usage
         use_playwright = os.getenv("USE_PLAYWRIGHT", "1") == "1"
         if use_playwright and PLAYWRIGHT_AVAILABLE:
-            browser = self._ensure_playwright_browser()
-            # Create isolated context/page per thread
-            context = browser.new_context(ignore_https_errors=True)
-            # Disable images via route for performance similar to Selenium prefs
+            # If an asyncio loop is already running in this thread, avoid Playwright Sync API
             try:
-                context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "media") else route.continue_())
-            except Exception:
-                pass
-            page = context.new_page()
-            self._thread_local.profile_dir = None  # Playwright manages its own storage unless configured
-            return UniversalProductExtractor._PWDriver(page)  # type: ignore[return-value]
+                asyncio.get_running_loop()
+                # Running inside an event loop; skip Playwright Sync API to prevent runtime errors
+                _log_with_thread("Async loop detected; skipping Playwright Sync API and using Selenium fallback", "[!]")
+            except RuntimeError:
+                # No running loop -> safe to use Playwright Sync API
+                browser = self._ensure_playwright_browser()
+                # Create isolated context/page per thread
+                context = browser.new_context(ignore_https_errors=True)
+                # Disable images via route for performance similar to Selenium prefs
+                try:
+                    context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "media") else route.continue_())
+                except Exception:
+                    pass
+                page = context.new_page()
+                self._thread_local.profile_dir = None  # Playwright manages its own storage unless configured
+                return UniversalProductExtractor._PWDriver(page)  # type: ignore[return-value]
         chrome_options = Options()
         chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
