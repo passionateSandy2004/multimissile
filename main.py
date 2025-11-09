@@ -890,20 +890,51 @@ class UniversalProductExtractor:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"]) 
         chrome_options.add_experimental_option('useAutomationExtension', False)
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        
-        # Use webdriver-manager if available, otherwise try system Chrome
+        chrome_binary = os.getenv("CHROME_BIN")
+        if chrome_binary:
+            chrome_options.binary_location = chrome_binary
+
+        driver_paths: List[str] = []
+        env_driver_path = os.getenv("CHROMEDRIVER_PATH")
+        if env_driver_path:
+            driver_paths.append(env_driver_path)
+        # Common fallback locations
+        driver_paths.extend([
+            "/usr/local/bin/chromedriver",
+            "/usr/bin/chromedriver",
+        ])
+
+        last_error: Optional[Exception] = None
+        for path in driver_paths:
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                service = Service(path)
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+                driver.set_page_load_timeout(30)
+                return driver
+            except Exception as exc:
+                last_error = exc
+                print(f"[!] Failed to start Chrome using system driver at {path}: {exc}")
+
         if WEBDRIVER_MANAGER_AVAILABLE:
             try:
                 service = Service(ChromeDriverManager().install())
                 driver = webdriver.Chrome(service=service, options=chrome_options)
-            except Exception as e:
-                print(f"[!] WebDriver Manager failed, trying system Chrome: {e}")
-                driver = webdriver.Chrome(options=chrome_options)
-        else:
+                driver.set_page_load_timeout(30)
+                return driver
+            except Exception as exc:
+                last_error = exc
+                print(f"[!] WebDriver Manager failed to obtain driver: {exc}")
+
+        try:
             driver = webdriver.Chrome(options=chrome_options)
-        
-        driver.set_page_load_timeout(30)
-        return driver
+            driver.set_page_load_timeout(30)
+            return driver
+        except Exception as exc:
+            if last_error:
+                raise last_error
+            raise exc
 
     def _wait_for_any_selector(self, driver: webdriver.Chrome, selectors: List[str], wait_seconds: int):
         end = time.time() + wait_seconds

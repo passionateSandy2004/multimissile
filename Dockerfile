@@ -43,6 +43,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Verify Chrome installation
 RUN google-chrome --version || echo "Chrome installation verification"
 
+# Install matching ChromeDriver
+RUN CHROME_VERSION=$(google-chrome --version | cut -d ' ' -f3 | cut -d '.' -f1) \
+    && DRIVER_VERSION=$(curl -sS https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}) \
+    && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${DRIVER_VERSION}/chromedriver_linux64.zip \
+    && unzip /tmp/chromedriver.zip -d /usr/local/bin/ \
+    && rm /tmp/chromedriver.zip \
+    && chmod +x /usr/local/bin/chromedriver
+
 # Set working directory
 WORKDIR /app
 
@@ -57,7 +65,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY main.py .
 
 # Set Python path
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app \
+    CHROMEDRIVER_PATH=/usr/local/bin/chromedriver \
+    CHROME_BIN=/usr/bin/google-chrome
 
 # Create a non-root user for security
 RUN useradd -m -u 1000 appuser && \
