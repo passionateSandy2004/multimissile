@@ -81,7 +81,7 @@ class UniversalProductExtractor:
         self._driver_creation_semaphore = threading.Semaphore(2)
         # Track URLs processed per driver to force cleanup periodically
         self._urls_processed = 0
-        self._urls_per_driver_cleanup = _get_env_int("URLS_PER_DRIVER_CLEANUP", 50)  # Restart driver every 50 URLs
+        self._urls_per_driver_cleanup = _get_env_int("URLS_PER_DRIVER_CLEANUP", 25)  # Restart driver every 25 URLs (more aggressive)
         
         # Initialize Supabase connection
         self.supabase: Optional[Client] = None
@@ -1716,6 +1716,10 @@ class ParallelURLExtractor:
         self._pending = 0
         self._pending_lock = threading.Lock()
         self._shutdown = False
+        # Circuit breaker for Errno 11 - track consecutive errors
+        self._errno11_count = 0
+        self._errno11_lock = threading.Lock()
+        self._errno11_threshold = 3  # Pause if 3 consecutive Errno 11 errors
 
     # ------------------------------------------------------------------
     # Context management & lifecycle
@@ -1823,10 +1827,28 @@ class ParallelURLExtractor:
             
             # If Errno 11 (resource unavailable), add longer backoff before retry
             if "Errno 11" in error_message or "Resource temporarily unavailable" in error_message:
-                # Wait longer before retrying to let system recover
-                backoff_seconds = 5 + (retry_count * 2)  # 5s, 7s, 9s, etc.
-                print(f"[!] Errno 11 detected, waiting {backoff_seconds}s before retry...")
-                time.sleep(backoff_seconds)
+                # Track consecutive Errno 11 errors
+                with self._errno11_lock:
+                    self._errno11_count += 1
+                    errno11_count = self._errno11_count
+                
+                # If too many consecutive Errno 11 errors, pause all workers to let system recover
+                if errno11_count >= self._errno11_threshold:
+                    pause_seconds = 30 + (errno11_count * 10)  # 30s, 40s, 50s, etc.
+                    print(f"[!] {errno11_count} consecutive Errno 11 errors detected. Pausing all workers for {pause_seconds}s to let system recover...")
+                    time.sleep(pause_seconds)
+                    # Reset counter after pause
+                    with self._errno11_lock:
+                        self._errno11_count = 0
+                else:
+                    # Wait longer before retrying to let system recover
+                    backoff_seconds = 5 + (retry_count * 2)  # 5s, 7s, 9s, etc.
+                    print(f"[!] Errno 11 detected ({errno11_count}/{self._errno11_threshold}), waiting {backoff_seconds}s before retry...")
+                    time.sleep(backoff_seconds)
+            else:
+                # Reset Errno 11 counter on successful operations
+                with self._errno11_lock:
+                    self._errno11_count = 0
             
             if url_id is not None:
                 _mark_for_retry(url_id, retry_count, error_message, max_retries)
@@ -1849,6 +1871,11 @@ class ParallelURLExtractor:
         if "job" not in result:
             result["job"] = job
         result["url_id"] = url_id
+        
+        # Reset Errno 11 counter on successful operations
+        if result.get("success"):
+            with self._errno11_lock:
+                self._errno11_count = 0
 
         if url_id is not None:
             if result.get("success"):
