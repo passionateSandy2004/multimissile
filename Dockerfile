@@ -104,13 +104,16 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright system dependencies as root (before switching users)
+# Set Playwright browser path to /ms-playwright (shared location)
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# Install Playwright browsers to shared location as root (includes system deps)
 RUN python -m playwright install --with-deps chromium
 
 # Create a non-root user for security
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app && \
-    chown -R appuser:appuser /root/.cache/ms-playwright
+    chmod -R 755 /ms-playwright
 
 # Copy application files
 COPY main.py .
@@ -121,8 +124,7 @@ USER appuser
 # Set Python path
 ENV PYTHONPATH=/app \
     CHROMEDRIVER_PATH=/usr/local/bin/chromedriver \
-    CHROME_BIN=/usr/bin/google-chrome \
-    PLAYWRIGHT_BROWSERS_PATH=/home/appuser/.cache/ms-playwright
+    CHROME_BIN=/usr/bin/google-chrome
 
 # Health check - check if Python process is running (for background worker)
 # Using ps to check if main.py process exists
