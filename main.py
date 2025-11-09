@@ -34,6 +34,21 @@ import random
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable, Union, Tuple
 
+
+def _get_thread_id() -> str:
+    """Get a short thread identifier for logging."""
+    thread_id = threading.current_thread().ident or 0
+    return f"T{thread_id % 10000:04d}"  # Format as T0001, T0002, etc.
+
+
+def _log_with_thread(message: str, prefix: str = ""):
+    """Log a message with thread identifier."""
+    thread_id = _get_thread_id()
+    if prefix:
+        print(f"[{thread_id}] {prefix} {message}")
+    else:
+        print(f"[{thread_id}] {message}")
+
 # Supabase imports
 try:
     from supabase import create_client, Client
@@ -167,7 +182,7 @@ class UniversalProductExtractor:
         # Force cleanup and restart driver after N URLs to prevent resource accumulation
         if driver is not None and thread_urls >= self._urls_per_driver_cleanup:
             try:
-                print(f"[*] Restarting driver after {thread_urls} URLs to prevent resource accumulation")
+                _log_with_thread(f"Restarting driver after {thread_urls} URLs to prevent resource accumulation", "[*]")
                 driver.quit()
             except Exception:
                 pass
@@ -419,7 +434,7 @@ class UniversalProductExtractor:
                     driver = self._setup_driver()
                     managed_driver = True
 
-                print(f"[Universal Extractor] Navigating: {url}")
+                _log_with_thread(f"Navigating: {url}", "[Universal Extractor]")
                 driver.get(url)
 
                 # Wait for the DOM to be ready
@@ -985,9 +1000,9 @@ class UniversalProductExtractor:
                 except Exception as exc:
                     last_error = exc
                     if attempt < max_retries - 1:
-                        print(f"[!] Retry {attempt + 1}/{max_retries} for driver at {path}: {exc}")
+                        _log_with_thread(f"Retry {attempt + 1}/{max_retries} for driver at {path}: {exc}", "[!]")
                     else:
-                        print(f"[!] Failed to start Chrome using system driver at {path}: {exc}")
+                        _log_with_thread(f"Failed to start Chrome using system driver at {path}: {exc}", "[!]")
 
         # Retry logic for WebDriver Manager
         if WEBDRIVER_MANAGER_AVAILABLE:
@@ -1005,9 +1020,9 @@ class UniversalProductExtractor:
                 except Exception as exc:
                     last_error = exc
                     if attempt < max_retries - 1:
-                        print(f"[!] Retry {attempt + 1}/{max_retries} for WebDriver Manager: {exc}")
+                        _log_with_thread(f"Retry {attempt + 1}/{max_retries} for WebDriver Manager: {exc}", "[!]")
                     else:
-                        print(f"[!] WebDriver Manager failed to obtain driver: {exc}")
+                        _log_with_thread(f"WebDriver Manager failed to obtain driver: {exc}", "[!]")
 
         # Final fallback with retry
         for attempt in range(max_retries):
@@ -1023,7 +1038,7 @@ class UniversalProductExtractor:
             except Exception as exc:
                 last_error = exc
                 if attempt < max_retries - 1:
-                    print(f"[!] Retry {attempt + 1}/{max_retries} for default Chrome driver: {exc}")
+                    _log_with_thread(f"Retry {attempt + 1}/{max_retries} for default Chrome driver: {exc}", "[!]")
         
         if last_error:
             raise last_error
@@ -1590,7 +1605,7 @@ class UniversalProductExtractor:
         saved_count = 0
         failed_count = 0
         
-        print(f"\n[*] Saving {len(products)} products to database...")
+        _log_with_thread(f"Saving {len(products)} products to database...", "[*]")
         
         for product in products:
             try:
@@ -1655,7 +1670,7 @@ class UniversalProductExtractor:
                 
                 # Skip if required fields are missing
                 if not db_data["product_name"] or not db_data["product_url"]:
-                    print(f"[!] Skipping product - missing required fields (name or URL)")
+                    _log_with_thread("Skipping product - missing required fields (name or URL)", "[!]")
                     failed_count += 1
                     continue
                 
@@ -1666,7 +1681,7 @@ class UniversalProductExtractor:
                 if response.data:
                     saved_count += 1
                     if saved_count % 10 == 0:
-                        print(f"[*] Saved {saved_count} products so far...")
+                        _log_with_thread(f"Saved {saved_count} products so far...", "[*]")
                 else:
                     failed_count += 1
                     
@@ -1677,13 +1692,13 @@ class UniversalProductExtractor:
                     # Product already exists, skip silently
                     saved_count += 1  # Count as successful since product already exists
                 else:
-                    print(f"[✗] Error saving product: {e}")
+                    _log_with_thread(f"Error saving product: {e}", "[✗]")
                     failed_count += 1
                 continue
         
-        print(f"[✓] Saved {saved_count}/{len(products)} products to database")
+        _log_with_thread(f"Saved {saved_count}/{len(products)} products to database", "[✓]")
         if failed_count > 0:
-            print(f"[!] Failed to save {failed_count} products")
+            _log_with_thread(f"Failed to save {failed_count} products", "[!]")
         
         return saved_count
 
@@ -1720,6 +1735,8 @@ class ParallelURLExtractor:
         self._errno11_count = 0
         self._errno11_lock = threading.Lock()
         self._errno11_threshold = 3  # Pause if 3 consecutive Errno 11 errors
+        # Stats tracking for RAM monitoring
+        self._stats = {"success_count": 0}
 
     # ------------------------------------------------------------------
     # Context management & lifecycle
@@ -1835,7 +1852,7 @@ class ParallelURLExtractor:
                 # If too many consecutive Errno 11 errors, pause all workers to let system recover
                 if errno11_count >= self._errno11_threshold:
                     pause_seconds = 30 + (errno11_count * 10)  # 30s, 40s, 50s, etc.
-                    print(f"[!] {errno11_count} consecutive Errno 11 errors detected. Pausing all workers for {pause_seconds}s to let system recover...")
+                    _log_with_thread(f"{errno11_count} consecutive Errno 11 errors detected. Pausing all workers for {pause_seconds}s to let system recover...", "[!]")
                     time.sleep(pause_seconds)
                     # Reset counter after pause
                     with self._errno11_lock:
@@ -1843,7 +1860,7 @@ class ParallelURLExtractor:
                 else:
                     # Wait longer before retrying to let system recover
                     backoff_seconds = 5 + (retry_count * 2)  # 5s, 7s, 9s, etc.
-                    print(f"[!] Errno 11 detected ({errno11_count}/{self._errno11_threshold}), waiting {backoff_seconds}s before retry...")
+                    _log_with_thread(f"Errno 11 detected ({errno11_count}/{self._errno11_threshold}), waiting {backoff_seconds}s before retry...", "[!]")
                     time.sleep(backoff_seconds)
             else:
                 # Reset Errno 11 counter on successful operations
@@ -1876,6 +1893,12 @@ class ParallelURLExtractor:
         if result.get("success"):
             with self._errno11_lock:
                 self._errno11_count = 0
+            
+            # Log RAM usage periodically (every 10 successful URLs)
+            stats = getattr(self, "_stats", {})
+            stats["success_count"] = stats.get("success_count", 0) + 1
+            if stats["success_count"] % 10 == 0:
+                _log_ram_usage(f"After {stats['success_count']} URLs")
 
         if url_id is not None:
             if result.get("success"):
@@ -2111,6 +2134,34 @@ def _estimate_ram_gb() -> float:
     return 8.0
 
 
+def _get_ram_usage() -> Dict[str, float]:
+    """Get current RAM usage statistics in GB."""
+    try:
+        import psutil  # type: ignore
+        mem = psutil.virtual_memory()
+        return {
+            "total_gb": mem.total / (1024 ** 3),
+            "available_gb": mem.available / (1024 ** 3),
+            "used_gb": mem.used / (1024 ** 3),
+            "percent": mem.percent,
+        }
+    except Exception:
+        return {
+            "total_gb": 0.0,
+            "available_gb": 0.0,
+            "used_gb": 0.0,
+            "percent": 0.0,
+        }
+
+
+def _log_ram_usage(context: str = ""):
+    """Log current RAM usage for monitoring."""
+    ram = _get_ram_usage()
+    if ram["total_gb"] > 0:
+        thread_id = _get_thread_id()
+        print(f"[{thread_id}] [RAM] {context} - Total: {ram['total_gb']:.2f}GB, Used: {ram['used_gb']:.2f}GB ({ram['percent']:.1f}%), Available: {ram['available_gb']:.2f}GB")
+
+
 def _determine_parallel_workers(explicit_workers: Optional[int] = None) -> int:
     if explicit_workers and explicit_workers > 0:
         return explicit_workers
@@ -2208,7 +2259,8 @@ def _process_url_batches(
                 if result.get("success")
                 else result.get("error", "error")
             )
-            print(f"[{status}] ({processed}/{total}) {result.get('url')} → {message}")
+            thread_id = _get_thread_id()
+            print(f"[{thread_id}] [{status}] ({processed}/{total}) {result.get('url')} → {message}")
 
         while True:
             if effective_limit is not None and processed_count >= effective_limit:
@@ -2447,7 +2499,8 @@ if __name__ == "__main__":
                     if result.get("success")
                     else result.get("error", "error")
                 )
-                print(f"[{status}] ({processed}/{total}) {result.get('url')} → {message}")
+                thread_id = _get_thread_id()
+                print(f"[{thread_id}] [{status}] ({processed}/{total}) {result.get('url')} → {message}")
 
             summary = runner.run_bulk(
                 manual_entries,
