@@ -1735,6 +1735,10 @@ class ParallelURLExtractor:
         self._errno11_count = 0
         self._errno11_lock = threading.Lock()
         self._errno11_threshold = 3  # Pause if 3 consecutive Errno 11 errors
+        # Global pause flag - when True, all workers pause
+        self._global_pause = False
+        self._global_pause_lock = threading.Lock()
+        self._global_pause_until = 0  # Timestamp when pause ends
         # Stats tracking for RAM monitoring
         self._stats = {"success_count": 0}
 
@@ -1816,6 +1820,17 @@ class ParallelURLExtractor:
         return job
 
     def _run_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        # Check if global pause is active
+        with self._global_pause_lock:
+            if self._global_pause and time.time() < self._global_pause_until:
+                wait_time = self._global_pause_until - time.time()
+                _log_with_thread(f"Global pause active, waiting {wait_time:.1f}s before processing...", "[!]")
+                time.sleep(wait_time)
+            elif self._global_pause:
+                # Pause expired, reset
+                self._global_pause = False
+                _log_with_thread("Global pause expired, resuming processing...", "[*]")
+        
         extractor = self._get_extractor()
         with self._pending_lock:
             self._pending += 1
@@ -1849,14 +1864,35 @@ class ParallelURLExtractor:
                     self._errno11_count += 1
                     errno11_count = self._errno11_count
                 
-                # If too many consecutive Errno 11 errors, pause all workers to let system recover
+                # If too many consecutive Errno 11 errors, pause ALL workers globally to let system recover
                 if errno11_count >= self._errno11_threshold:
-                    pause_seconds = 30 + (errno11_count * 10)  # 30s, 40s, 50s, etc.
-                    _log_with_thread(f"{errno11_count} consecutive Errno 11 errors detected. Pausing all workers for {pause_seconds}s to let system recover...", "[!]")
+                    pause_seconds = 60 + (errno11_count * 20)  # 60s, 80s, 100s, etc. (longer pause)
+                    _log_with_thread(f"{errno11_count} consecutive Errno 11 errors detected. Activating global pause for {pause_seconds}s to let system recover...", "[!]")
+                    
+                    # Set global pause flag - all workers will wait
+                    with self._global_pause_lock:
+                        self._global_pause = True
+                        self._global_pause_until = time.time() + pause_seconds
+                    
+                    # Force cleanup all drivers to free resources
+                    _log_with_thread("Forcing cleanup of all drivers to free resources...", "[*]")
+                    with self._extractors_lock:
+                        for ext in self._extractors:
+                            try:
+                                # Close all active drivers but don't shutdown the extractor
+                                ext._close_all_drivers()
+                            except Exception:
+                                pass
+                    
+                    # Wait for pause duration
                     time.sleep(pause_seconds)
-                    # Reset counter after pause
+                    
+                    # Reset counters after pause
                     with self._errno11_lock:
                         self._errno11_count = 0
+                    with self._global_pause_lock:
+                        self._global_pause = False
+                        _log_with_thread("Global pause ended, all workers resuming...", "[*]")
                 else:
                     # Wait longer before retrying to let system recover
                     backoff_seconds = 5 + (retry_count * 2)  # 5s, 7s, 9s, etc.
@@ -1866,6 +1902,31 @@ class ParallelURLExtractor:
                 # Reset Errno 11 counter on successful operations
                 with self._errno11_lock:
                     self._errno11_count = 0
+            
+            # If Errno 11 persists after multiple retries, skip this URL to prevent infinite loop
+            if "Errno 11" in error_message or "Resource temporarily unavailable" in error_message:
+                if retry_count >= max_retries:
+                    _log_with_thread(f"Skipping URL after {retry_count} retries due to persistent Errno 11: {job['url']}", "[!]")
+                    if url_id is not None:
+                        _update_url_status(
+                            url_id,
+                            processing_status="failed",
+                            success=False,
+                            products_found=0,
+                            products_saved=0,
+                            error_message=f"Skipped after {retry_count} retries: {error_message}",
+                            retry_count=retry_count,
+                            clear_claim=True,
+                        )
+                    return {
+                        "success": False,
+                        "page_url": job["url"],
+                        "url": job["url"],
+                        "error": f"Skipped after {retry_count} retries: {error_message}",
+                        "duration_seconds": round(duration, 3),
+                        "url_id": url_id,
+                        "skipped": True,
+                    }
             
             if url_id is not None:
                 _mark_for_retry(url_id, retry_count, error_message, max_retries)
