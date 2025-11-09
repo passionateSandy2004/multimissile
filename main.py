@@ -77,6 +77,8 @@ class UniversalProductExtractor:
         self._drivers_lock = threading.Lock()
         self._active_drivers = set()
         self._driver_creation_lock = threading.Lock()  # Lock for driver creation to prevent race conditions
+        # Semaphore to limit concurrent driver creation (max 2 at a time to avoid Errno 11)
+        self._driver_creation_semaphore = threading.Semaphore(2)
         
         # Initialize Supabase connection
         self.supabase: Optional[Client] = None
@@ -875,9 +877,12 @@ class UniversalProductExtractor:
         return clicked
 
     def _setup_driver(self) -> webdriver.Chrome:
-        # Use lock to prevent concurrent driver creation (fixes Railway Errno 11)
-        with self._driver_creation_lock:
-            return self._setup_driver_internal()
+        # Use semaphore to limit concurrent driver creation (max 2 at a time)
+        # This prevents Railway Errno 11 errors from too many simultaneous process creations
+        with self._driver_creation_semaphore:
+            # Also use lock for additional safety
+            with self._driver_creation_lock:
+                return self._setup_driver_internal()
 
     def _setup_driver_internal(self) -> webdriver.Chrome:
         chrome_options = Options()
@@ -922,12 +927,13 @@ class UniversalProductExtractor:
 
         last_error: Optional[Exception] = None
         max_retries = 3
-        retry_delay = 2.0  # Start with 2 seconds (longer delay for Railway)
+        retry_delay = 3.0  # Start with 3 seconds (longer delay for Railway)
         
-        # Stagger startup to avoid all workers hitting resources at once
-        # Use thread ID to create unique delays per worker
+        # Stagger startup significantly to avoid all workers hitting resources at once
+        # Use thread ID to create unique delays per worker - spread them out more
         thread_id = threading.current_thread().ident or 0
-        startup_delay = random.uniform(0.2, 0.8) * (thread_id % 10) / 10.0
+        # Create delays between 0.5 to 5 seconds, spread across workers
+        startup_delay = 0.5 + (random.uniform(0.5, 1.5) * (thread_id % 20))
         time.sleep(startup_delay)
         
         # Retry logic for each path
