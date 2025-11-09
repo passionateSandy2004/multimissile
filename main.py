@@ -2064,8 +2064,13 @@ def _determine_parallel_workers(explicit_workers: Optional[int] = None) -> int:
         ram_limited = max(1, int(ram_gb / 0.8))
         # Allow up to 4x CPU cores on Railway (can handle more with good RAM)
         cpu_limited = max(1, cpu_count * 4)
-        # Cap based on RAM: if RAM >= 16GB, allow up to 20 workers, else cap at 8
-        max_workers = 20 if ram_gb >= 16 else 8
+        # Cap based on RAM: if RAM >= 32GB, allow up to 30 workers, else scale down
+        if ram_gb >= 32:
+            max_workers = 30  # Can handle many workers with 32GB+
+        elif ram_gb >= 16:
+            max_workers = 20
+        else:
+            max_workers = 8
         return max(1, min(ram_limited, cpu_limited, max_workers))
     
     # Standard logic for non-Railway environments
